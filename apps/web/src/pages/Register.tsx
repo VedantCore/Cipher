@@ -1,92 +1,153 @@
-import React, { useEffect } from 'react';
+import { useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { registerSchema } from '@cipher/validation';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
+import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { supabase } from '../lib/supabase';
-import { generateIdentityKeys } from '../features/crypto/keys';
-import { useNavigate, Link } from 'react-router-dom';
-
-// THE FIX: Force Firebase to forget any persistent session immediately
-auth.signOut().catch(console.error);
+import { registerSchema, type RegisterInput } from '@cipher/validation';
+import { generateKeyPair } from "../features/crypto/encryption";
 
 export default function Register() {
   const navigate = useNavigate();
-  const { register, handleSubmit, formState: { errors } } = useForm({
-    resolver: zodResolver(registerSchema)
+  const [globalError, setGlobalError] = useState('');
+  const [isSuccess, setIsSuccess] = useState(false);
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<RegisterInput>({
+    resolver: zodResolver(registerSchema),
   });
 
-  const onSubmit = async (data: any) => {
+  const onSubmit = async (data: RegisterInput) => {
     try {
-      // 1. Create Firebase Auth Account
+      setGlobalError('');
+      
+      // 1. Authenticate with Firebase
       const userCredential = await createUserWithEmailAndPassword(auth, data.email, data.password);
       const user = userCredential.user;
 
-      // 2. Generate Zero-Knowledge Keys locally on your Mac
-      const { publicKey, privateKey } = await generateIdentityKeys();
-
-      // 3. SECURE STORAGE: Save Private Key locally (NEVER leaves this device)
-      localStorage.setItem('cipher_priv_key', privateKey);
-
-      // 4. Update Supabase with Public Profile and Public Key
-      const { error } = await supabase.from('profiles').insert({
-        id: user.uid,
-        username: data.username,
-        public_key: publicKey,
+      await updateProfile(user, {
+        displayName: data.displayName
       });
 
-      if (error) throw error;
+      // 2. Generate Cryptographic Identity (Libsodium)
+      const { publicKey, privateKey } = await generateKeyPair();
 
-      alert("Identity Secured! Redirecting to chat...");
-      navigate('/chat');
-    } catch (error: any) {
-      alert(error.message);
+      // Store the Private Key locally (NEVER send this to the server)
+      localStorage.setItem('cipher_priv_key', privateKey);
+
+      // 3. Store the Public Profile in Supabase
+      const { error: dbError } = await supabase
+        .from('profiles')
+        .insert({
+          id: user.uid,
+          username: data.displayName,
+          public_key: publicKey,
+        });
+
+      if (dbError) {
+        throw new Error(`Database Error: ${dbError.message}`);
+      }
+
+      setIsSuccess(true);
+      
+      // Briefly show success state before redirecting
+      setTimeout(() => {
+        navigate('/login');
+      }, 1500);
+
+    } catch (err: any) {
+      console.error(err);
+      setGlobalError(err.message || 'An error occurred during registration.');
     }
   };
 
+  if (isSuccess) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+        <div className="text-center space-y-4">
+          <div className="w-16 h-16 bg-green-500/20 text-green-500 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+          </div>
+          <h2 className="text-3xl font-bold text-white">Identity Secured</h2>
+          <p className="text-slate-400">Cryptographic keys generated successfully.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-      <div className="w-full max-w-md bg-slate-900 rounded-2xl p-8 border border-white/5 shadow-2xl">
-        <h1 className="text-3xl font-bold text-white mb-2">Initialize Node</h1>
-        <p className="text-slate-400 mb-8 text-sm">Generate your cryptographic identity.</p>
-        
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-          <div>
-            <input 
-              {...register('username')} 
-              placeholder="Username" 
-              className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none" 
-            />
-            {errors.username && <p className="text-red-400 text-xs mt-1">{errors.username.message as string}</p>}
+    <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+      <div className="max-w-md w-full space-y-8">
+        <div className="text-center">
+          <h2 className="text-3xl font-bold text-white">Initialize Node</h2>
+          <p className="mt-2 text-slate-400">Establish your cryptographic identity.</p>
+        </div>
+
+        <form onSubmit={handleSubmit(onSubmit)} className="mt-8 space-y-6">
+          {globalError && (
+            <div className="p-3 bg-red-500/10 border border-red-500/50 rounded text-red-500 text-sm">
+              {globalError}
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <input
+                {...register('displayName')}
+                className="w-full px-4 py-3 bg-slate-900 border border-slate-800 rounded-md text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                placeholder="Display Name"
+              />
+              {errors.displayName && (
+                <p className="mt-1 text-sm text-red-500">{errors.displayName.message}</p>
+              )}
+            </div>
+
+            <div>
+              <input
+                {...register('email')}
+                type="email"
+                className="w-full px-4 py-3 bg-slate-900 border border-slate-800 rounded-md text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                placeholder="Email Address"
+              />
+              {errors.email && (
+                <p className="mt-1 text-sm text-red-500">{errors.email.message}</p>
+              )}
+            </div>
+
+            <div>
+              <input
+                {...register('password')}
+                type="password"
+                className="w-full px-4 py-3 bg-slate-900 border border-slate-800 rounded-md text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                placeholder="Secure Password"
+              />
+              {errors.password && (
+                <p className="mt-1 text-sm text-red-500">{errors.password.message}</p>
+              )}
+            </div>
           </div>
-          <div>
-            <input 
-              {...register('email')} 
-              placeholder="Email" 
-              className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none" 
-            />
-            {errors.email && <p className="text-red-400 text-xs mt-1">{errors.email.message as string}</p>}
-          </div>
-          <div>
-            <input 
-              type="password" 
-              {...register('password')} 
-              placeholder="Master Password" 
-              className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none" 
-            />
-            {errors.password && <p className="text-red-400 text-xs mt-1">{errors.password.message as string}</p>}
-          </div>
-          <button 
-            type="submit" 
-            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-indigo-500/20"
+
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            Secure My Identity
+            {isSubmitting ? 'Generating Keys...' : 'Secure My Identity'}
           </button>
         </form>
-        <div className="mt-6 text-center">
-          <Link to="/login" className="text-indigo-400 text-sm hover:underline">Already have a node? Login</Link>
-        </div>
+
+        <p className="text-center text-sm text-slate-400">
+          Already established a node?{' '}
+          <Link to="/login" className="font-medium text-indigo-500 hover:text-indigo-400">
+            Establish Connection
+          </Link>
+        </p>
       </div>
     </div>
   );
